@@ -107,13 +107,20 @@ if __name__ == '__main__':
 	else:
 		print("SMSP: Can't read, response code = %s" % (sw,))
 
+	# EF.SPN
+	(res, sw) = scc.read_binary(['3f00', '7f20', '6f46'])
+	if sw == '9000':
+		print("SPN: %s" % (res,))
+	else:
+		print("SPN: Can't read, response code = %s" % (sw,))
+
 	# EF.HPLMN
-#	(res, sw) = scc.read_binary(['3f00', '7f20', '6f30'])
-#	if sw == '9000':
-#		print("HPLMN: %s" % (res))
+	(res, sw) = scc.read_binary(['3f00', '7f20', '6f30'])
+	if sw == '9000':
+		print("HPLMN: %s" % (res))
 #		print("HPLMN: %s" % (dec_hplmn(res),))
-#	else:
-#		print("HPLMN: Can't read, response code = %s" % (sw,))
+	else:
+		print("HPLMN: Can't read, response code = %s" % (sw,))
 	# FIXME
 
 	# EF.ACC

@@ -7,6 +7,7 @@
 #
 # Copyright (C) 2009-2010  Sylvain Munaut <tnt@246tNt.com>
 # Copyright (C) 2011  Harald Welte <laforge@gnumonks.org>
+# Copyright (C) 2017 Alexander.Chemeris <Alexander.Chemeris@gmail.com>
 #
 # This program is free software: you can redistribute it and/or modify
 # it under the terms of the GNU General Public License as published by
@@ -22,16 +23,89 @@
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #
 
-from pySim.utils import b2h, h2b, swap_nibbles, rpad, lpad, enc_imsi, enc_iccid, enc_plmn
-
+from pySim.ts_51_011 import EF, DF
+from pySim.utils import *
+from smartcard.util import toHexString, toBytes
 
 class Card(object):
 
 	def __init__(self, scc):
 		self._scc = scc
+		self._adm1_chv_num = 4
+		self._adm2_chv_num = 5
 
 	def reset(self):
 		self._scc.reset_card()
+
+	def verify_adm1(self, key):
+		'''
+		Authenticate with ADM1 key
+		'''
+		(res, sw) = self._scc.verify_chv(self._adm1_chv_num, key)
+		return sw
+
+	def verify_adm2(self, key):
+		'''
+		Authenticate with ADM2 key
+		'''
+		(res, sw) = self._scc.verify_chv(self._adm2_chv_num, key)
+		return sw
+
+	def read_iccid(self):
+		(res, sw) = self._scc.read_binary(EF['ICCID'])
+		if sw == '9000':
+			return (dec_iccid(res), sw)
+		else:
+			return (None, sw)
+
+	def read_imsi(self):
+		(res, sw) = self._scc.read_binary(EF['IMSI'])
+		if sw == '9000':
+			return (dec_imsi(res), sw)
+		else:
+			return (None, sw)
+
+	def update_imsi(self, imsi):
+		data, sw = self._scc.update_binary(EF['IMSI'], enc_imsi(imsi))
+		return sw
+
+	def update_acc(self, acc):
+		data, sw = self._scc.update_binary(EF['ACC'], lpad(acc, 4))
+		return sw
+
+	def update_hplmn_act(self, mcc, mnc, access_tech='FFFF'):
+		"""
+		Update Home PLMN with access technology bit-field
+
+		See Section "10.3.37 EFHPLMNwAcT (HPLMN Selector with Access Technology)"
+		in ETSI TS 151 011 for the details of the access_tech field coding.
+		Some common values:
+		access_tech = '0080' # Only GSM is selected
+		access_tech = 'FFFF' # All technologues selected, even Reserved for Future Use ones
+		"""
+		# get size and write EF.HPLMNwAcT
+		r = self._scc.select_file(EF['HPLMNwAcT'])
+		size = int(r[-1][4:8], 16)
+		hplmn = enc_plmn(mcc, mnc)
+		content = hplmn + access_tech
+		data, sw = self._scc.update_binary(EF['HPLMNwAcT'], content + 'ffffff0000' * (size/5-1))
+		return sw
+
+	def update_smsp(self, smsp):
+		data, sw = self._scc.update_record(EF['SMSP'], 1, rpad(smsp, 84))
+		return sw
+
+	def read_spn(self):
+		(spn, sw) = self._scc.read_binary(EF['SPN'])
+		if sw == '9000':
+			return (dec_spn(spn), sw)
+		else:
+			return (None, sw)
+
+	def update_spn(self, name, hplmn_disp=False, oplmn_disp=False):
+		content = enc_spn(name, hplmn_disp, oplmn_disp)
+		data, sw = self._scc.update_binary(EF['SPN'], rpad(content, 32))
+		return sw
 
 
 class _MagicSimBase(Card):
@@ -353,7 +427,12 @@ class SysmoSIMgr2(Card):
 
 	@classmethod
 	def autodetect(kls, scc):
-		# TODO: look for ATR 3B 7D 94 00 00 55 55 53 0A 74 86 93 0B 24 7C 4D 54 68
+		try:
+			# Look for ATR
+			if scc.get_atr() == toBytes("3B 7D 94 00 00 55 55 53 0A 74 86 93 0B 24 7C 4D 54 68"):
+				return kls(scc)
+		except:
+			return None
 		return None
 
 	def program(self, p):
@@ -429,7 +508,12 @@ class SysmoUSIMSJS1(Card):
 
 	@classmethod
 	def autodetect(kls, scc):
-		# TODO: look for ATR 3B 9F 96 80 1F C7 80 31 A0 73 BE 21 13 67 43 20 07 18 00 00 01 A5
+		try:
+			# Look for ATR
+			if scc.get_atr() == toBytes("3B 9F 96 80 1F C7 80 31 A0 73 BE 21 13 67 43 20 07 18 00 00 01 A5"):
+				return kls(scc)
+		except:
+			return None
 		return None
 
 	def program(self, p):
@@ -460,12 +544,150 @@ class SysmoUSIMSJS1(Card):
 		data, sw = self._scc.update_binary('6f07', enc_imsi(p['imsi']))
 
 
+	def erase(self):
+		return
+
+
+class FairwavesSIM(Card):
+	"""
+	FairwavesSIM
+
+	The SIM card is operating according to the standard.
+	For Ki/OP/OPC programming the following files are additionally open for writing:
+		3F00/7F20/FF01 – OP/OPC:
+		byte 1 = 0x01, bytes 2-17: OPC;
+		byte 1 = 0x00, bytes 2-17: OP;
+		3F00/7F20/FF02: Ki
+	"""
+
+	name = 'Fairwaves SIM'
+	# Propriatary files
+	_EF_num = {
+	'Ki': 'FF02',
+	'OP/OPC': 'FF01',
+	}
+	_EF = {
+	'Ki':     DF['GSM']+[_EF_num['Ki']],
+	'OP/OPC': DF['GSM']+[_EF_num['OP/OPC']],
+	}
+
+	def __init__(self, ssc):
+		super(FairwavesSIM, self).__init__(ssc)
+		self._adm1_chv_num = 0x11
+		self._adm2_chv_num = 0x12
+
+
+	@classmethod
+	def autodetect(kls, scc):
+		try:
+			# Look for ATR
+			if scc.get_atr() == toBytes("3B 9F 96 80 1F C7 80 31 A0 73 BE 21 13 67 44 22 06 10 00 00 01 A9"):
+				return kls(scc)
+		except:
+			return None
+		return None
+
+
+	def read_ki(self):
+		"""
+		Read Ki in proprietary file.
+
+		Requires ADM1 access level
+		"""
+		return self._scc.read_binary(self._EF['Ki'])
+
+
+	def update_ki(self, ki):
+		"""
+		Set Ki in proprietary file.
+
+		Requires ADM1 access level
+		"""
+		data, sw = self._scc.update_binary(self._EF['Ki'], ki)
+		return sw
+
+
+	def read_op_opc(self):
+		"""
+		Read Ki in proprietary file.
+
+		Requires ADM1 access level
+		"""
+		(ef, sw) = self._scc.read_binary(self._EF['OP/OPC'])
+		type = 'OP' if ef[0:2] == '00' else 'OPC'
+		return ((type, ef[2:]), sw)
+
+
+	def update_op(self, op):
+		"""
+		Set OP in proprietary file.
+
+		Requires ADM1 access level
+		"""
+		content = '00' + op
+		data, sw = self._scc.update_binary(self._EF['OP/OPC'], content)
+		return sw
+
+
+	def update_opc(self, opc):
+		"""
+		Set OPC in proprietary file.
+
+		Requires ADM1 access level
+		"""
+		content = '01' + opc
+		data, sw = self._scc.update_binary(self._EF['OP/OPC'], content)
+		return sw
+
+
+	def program(self, p):
+		# authenticate as ADM1
+		if not p['pin_adm']:
+			raise ValueError("Please provide a PIN-ADM as there is no default one")
+		sw = self.verify_adm1(h2b(p['pin_adm']))
+		if sw != '9000':
+			raise RuntimeError('Failed to authenticate with ADM key %s'%(p['pin_adm'],))
+
+		# TODO: Set operator name
+		if p.get('smsp') is not None:
+			sw = self.update_smsp(p['smsp'])
+			if sw != '9000':
+				print("Programming SMSP failed with code %s"%sw)
+		# This SIM doesn't support changing ICCID
+		if p.get('mcc') is not None and p.get('mnc') is not None:
+			sw = self.update_hplmn_act(p['mcc'], p['mnc'])
+			if sw != '9000':
+				print("Programming MCC/MNC failed with code %s"%sw)
+		if p.get('imsi') is not None:
+			sw = self.update_imsi(p['imsi'])
+			if sw != '9000':
+				print("Programming IMSI failed with code %s"%sw)
+		if p.get('ki') is not None:
+			sw = self.update_ki(p['ki'])
+			if sw != '9000':
+				print("Programming Ki failed with code %s"%sw)
+		if p.get('opc') is not None:
+			sw = self.update_opc(p['opc'])
+			if sw != '9000':
+				print("Programming OPC failed with code %s"%sw)
+		if p.get('acc') is not None:
+			sw = self.update_acc(p['acc'])
+			if sw != '9000':
+				print("Programming ACC failed with code %s"%sw)
 
 	def erase(self):
 		return
 
 
-
 	# In order for autodetection ...
 _cards_classes = [ FakeMagicSim, SuperSim, MagicSim, GrcardSim,
-		   SysmoSIMgr1, SysmoSIMgr2, SysmoUSIMgr1, SysmoUSIMSJS1 ]
+		   SysmoSIMgr1, SysmoSIMgr2, SysmoUSIMgr1, SysmoUSIMSJS1,
+		   FairwavesSIM ]
+
+def card_autodetect(scc):
+	for kls in _cards_classes:
+		card = kls.autodetect(scc)
+		if card is not None:
+			card.reset()
+			return card
+	return None
