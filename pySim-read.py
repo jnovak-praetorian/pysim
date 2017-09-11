@@ -135,7 +135,7 @@ if __name__ == '__main__':
 		else:
 			print("MSISDN: Can't read, response code = %s" % (sw,))
 	except:
-		print "MSISDN: Can't read. Probably not existing file"
+		print("MSISDN: Can't read. Probably not existing file")
 
 	# Done for this card and maybe for everything ?
-	print "Done !\n"
+	print("Done !\n")
